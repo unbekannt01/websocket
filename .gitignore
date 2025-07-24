@@ -1,7 +1,6 @@
 # compiled output
 /dist
 /node_modules
-/build
 
 # Logs
 logs
@@ -43,14 +42,5 @@ lerna-debug.log*
 .env.local
 
 # temp directory
-.temp
 .tmp
-
-# Runtime data
-pids
-*.pid
-*.seed
-*.pid.lock
-
-# Diagnostic reports (https://nodejs.org/api/report.html)
-report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+.temp
