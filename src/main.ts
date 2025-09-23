@@ -2,21 +2,48 @@
 /* eslint-disable @typescript-eslint/no-floating-promises */
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import helmet from 'helmet';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // Enable CORS for all origins (you can restrict this in production)
+  // Security headers
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          scriptSrc: ["'self'", "'unsafe-inline'", 'cdnjs.cloudflare.com'],
+          styleSrc: ["'self'", "'unsafe-inline'"],
+          connectSrc: ["'self'", 'ws://localhost:3000', 'wss://localhost:3000'],
+          imgSrc: ["'self'", 'data:', 'https:'],
+          fontSrc: ["'self'", 'https:', 'data:'],
+        },
+      },
+      crossOriginEmbedderPolicy: false, // Disable for WebSocket compatibility
+    }),
+  );
+
+  // CORS configuration for local development
   app.enableCors({
-    origin: '*',
+    origin: [
+      'http://localhost:3000',
+      'file://', // For opening HTML file directly
+      '*', // Allow all origins for development (remove in production)
+    ],
     methods: ['GET', 'POST'],
     credentials: true,
+    optionsSuccessStatus: 200,
   });
 
-  const port = process.env.PORT || 3000;
+  const port = 3000;
   console.log(`Server starting on port ${port}`);
+  console.log(`Environment: development`);
 
   await app.listen(port, '0.0.0.0');
-  console.log(`WebSocket Chat Backend running on port ${port}`);
+  console.log(
+    `🔐 Secure WebSocket Chat Backend running on http://localhost:${port}`,
+  );
 }
+
 bootstrap();
