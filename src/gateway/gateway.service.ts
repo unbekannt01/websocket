@@ -20,8 +20,7 @@ interface Room {
   members: Set<string>;
   createdAt: Date;
   messageCount: number;
-  // E2E Encryption: Store member public keys
-  memberPublicKeys: Map<string, string>; // clientId -> publicKey
+  memberPublicKeys: Map<string, string>;
 }
 
 interface AuthenticatedUser {
@@ -32,7 +31,6 @@ interface AuthenticatedUser {
   joinedAt: Date;
   lastActivity: Date;
   messageCount: number;
-  // E2E Encryption: Store user's public key
   publicKey?: string;
 }
 
@@ -40,16 +38,6 @@ interface RateLimitInfo {
   count: number;
   resetTime: number;
   blocked: boolean;
-}
-
-interface EncryptedMessage {
-  roomId: string;
-  username: string;
-  encryptedPayloads: Map<string, string>; // recipientId -> encrypted content
-  timestamp: string;
-  senderId: string;
-  iv?: string; // For symmetric encryption of room messages
-  signature?: string; // Message authenticity
 }
 
 @WebSocketGateway({
@@ -69,7 +57,6 @@ export class GatewayService {
   private users: Map<string, AuthenticatedUser> = new Map();
   private rateLimiter: Map<string, RateLimitInfo> = new Map();
   
-  // Rate limiting configurations
   private readonly rateLimits = {
     'create-room': { maxRequests: 3, windowMs: 300000 },
     'join-room': { maxRequests: 10, windowMs: 60000 },
@@ -86,9 +73,6 @@ export class GatewayService {
       client.disconnect(true);
       return;
     }
-
-    console.log('User Connected:', client.id);
-    this.logSecurity('USER_CONNECTED', client.id);
 
     const sessionToken = this.generateSessionToken();
     this.users.set(client.id, {
@@ -115,7 +99,6 @@ export class GatewayService {
   }
 
   handleDisconnect(client: Socket) {
-    console.log('User Disconnected:', client.id);
     this.logSecurity('USER_DISCONNECTED', client.id);
 
     const user = this.users.get(client.id);
@@ -127,7 +110,6 @@ export class GatewayService {
     this.cleanupRateLimiter(client.id);
   }
 
-  // NEW: Register user's public key for E2E encryption
   @SubscribeMessage('register-public-key')
   handleRegisterPublicKey(
     @MessageBody() data: { publicKey: string },
@@ -146,25 +128,21 @@ export class GatewayService {
 
       const { publicKey } = data;
 
-      // Validate public key format (base64 encoded)
       if (!publicKey || typeof publicKey !== 'string' || publicKey.length < 100 || publicKey.length > 1000) {
         client.emit('key-error', { message: 'Invalid public key format' });
         return;
       }
 
-      // Store public key
       const user = this.users.get(client.id);
       if (user) {
         user.publicKey = publicKey;
         this.logSecurity('PUBLIC_KEY_REGISTERED', client.id);
         client.emit('key-registered', { success: true });
 
-        // If user is in a room, broadcast their public key to room members
         if (user.currentRoom) {
           const room = this.rooms.get(user.currentRoom);
           if (room) {
             room.memberPublicKeys.set(client.id, publicKey);
-            // Notify other room members about the new public key
             client.to(user.currentRoom).emit('member-key-updated', {
               memberId: client.id,
               publicKey: publicKey,
@@ -173,12 +151,10 @@ export class GatewayService {
         }
       }
     } catch (error) {
-      console.error('Error registering public key:', error);
       client.emit('key-error', { message: 'Failed to register public key' });
     }
   }
 
-  // NEW: Get public keys of all room members
   @SubscribeMessage('get-room-public-keys')
   handleGetRoomPublicKeys(
     @MessageBody() data: { roomId: string },
@@ -198,7 +174,6 @@ export class GatewayService {
         return;
       }
 
-      // Collect public keys of all room members
       const publicKeys: { [key: string]: string } = {};
       room.members.forEach((memberId) => {
         const publicKey = room.memberPublicKeys.get(memberId);
@@ -209,7 +184,7 @@ export class GatewayService {
 
       client.emit('room-public-keys', { publicKeys });
     } catch (error) {
-      console.error('Error getting room public keys:', error);
+      // Handle error silently
     }
   }
 
@@ -252,10 +227,9 @@ export class GatewayService {
         members: new Set([client.id]),
         createdAt: new Date(),
         messageCount: 0,
-        memberPublicKeys: new Map(), // Initialize for E2E
+        memberPublicKeys: new Map(),
       };
 
-      // Add creator's public key if available
       const user = this.users.get(client.id);
       if (user?.publicKey) {
         room.memberPublicKeys.set(client.id, user.publicKey);
@@ -269,7 +243,6 @@ export class GatewayService {
 
       client.join(roomId);
 
-      console.log(`Room created: ${roomId} by ${client.id}`);
       this.logSecurity('ROOM_CREATED', client.id, { roomId, roomName });
 
       client.emit('room-created', {
@@ -277,11 +250,10 @@ export class GatewayService {
         roomName: room.name,
         inviteToken,
         message: 'Room created successfully',
-        encryptionEnabled: true, // Signal E2E encryption support
+        encryptionEnabled: true,
       });
 
     } catch (error) {
-      console.error('Error creating room:', error);
       this.logSecurity('CREATE_ROOM_ERROR', client.id, { error: error.message });
       client.emit('room-error', { message: 'Failed to create room' });
     }
@@ -320,6 +292,28 @@ export class GatewayService {
         return;
       }
 
+      // Check if user is already in this room
+      if (room.members.has(client.id)) {
+        const user = this.users.get(client.id);
+        if (user && user.currentRoom === sanitizedRoomId) {
+          // User is already in the room, just confirm without notifications
+          const publicKeys: { [key: string]: string } = {};
+          room.memberPublicKeys.forEach((key, memberId) => {
+            publicKeys[memberId] = key;
+          });
+
+          client.emit('room-joined', {
+            roomId: sanitizedRoomId,
+            roomName: room.name,
+            inviteToken: client.id === room.creator ? room.inviteToken : undefined,
+            message: 'Already in room',
+            encryptionEnabled: true,
+            publicKeys,
+          });
+          return;
+        }
+      }
+
       let accessGranted = false;
       
       if (inviteToken && inviteToken === room.inviteToken) {
@@ -340,13 +334,12 @@ export class GatewayService {
       }
 
       const user = this.users.get(client.id);
-      if (user && user.currentRoom) {
+      if (user && user.currentRoom && user.currentRoom !== sanitizedRoomId) {
         this.leaveRoom(client, user.currentRoom);
       }
 
       room.members.add(client.id);
       
-      // Add user's public key to room if available
       if (user?.publicKey) {
         room.memberPublicKeys.set(client.id, user.publicKey);
       }
@@ -357,10 +350,8 @@ export class GatewayService {
 
       client.join(sanitizedRoomId);
 
-      console.log(`User ${client.id} joined room: ${sanitizedRoomId}`);
       this.logSecurity('ROOM_JOINED', client.id, { roomId: sanitizedRoomId });
 
-      // Collect all member public keys
       const publicKeys: { [key: string]: string } = {};
       room.memberPublicKeys.forEach((key, memberId) => {
         publicKeys[memberId] = key;
@@ -372,10 +363,10 @@ export class GatewayService {
         inviteToken: client.id === room.creator ? room.inviteToken : undefined,
         message: 'Successfully joined room',
         encryptionEnabled: true,
-        publicKeys, // Send all member public keys
+        publicKeys,
       });
 
-      // Notify other room members and send new user's public key
+      // Only notify others when a NEW user joins
       client.to(sanitizedRoomId).emit('user-joined', {
         message: `A user joined the room`,
         memberCount: room.members.size,
@@ -384,7 +375,6 @@ export class GatewayService {
       });
 
     } catch (error) {
-      console.error('Error joining room:', error);
       this.logSecurity('JOIN_ROOM_ERROR', client.id, { error: error.message });
       client.emit('room-error', { message: 'Failed to join room' });
     }
@@ -404,21 +394,19 @@ export class GatewayService {
       const sanitizedRoomId = this.sanitizeInput(roomId);
       this.leaveRoom(client, sanitizedRoomId);
     } catch (error) {
-      console.error('Error leaving room:', error);
       this.logSecurity('LEAVE_ROOM_ERROR', client.id, { error: error.message });
     }
   }
 
-  // MODIFIED: Handle encrypted messages
   @SubscribeMessage('encrypted-message')
   async handleEncryptedMessage(
     @MessageBody() data: {
       roomId: string;
       username: string;
-      encryptedContent: string; // Encrypted with room key
-      iv: string; // Initialization vector
+      encryptedContent: string;
+      iv: string;
       timestamp: string;
-      signature?: string; // Optional message signature
+      signature?: string;
     },
     @ConnectedSocket() client: Socket,
   ) {
@@ -443,8 +431,7 @@ export class GatewayService {
       const sanitizedRoomId = this.sanitizeInput(roomId);
       const sanitizedUsername = this.sanitizeInput(username, 20);
 
-      // Validate encrypted content format (base64)
-      if (encryptedContent.length > 10000) { // Reasonable limit
+      if (encryptedContent.length > 10000) {
         client.emit('room-error', { message: 'Message too large' });
         return;
       }
@@ -479,10 +466,9 @@ export class GatewayService {
 
       room.messageCount++;
 
-      console.log(`Encrypted message in room ${sanitizedRoomId} from ${sanitizedUsername}`);
       this.logSecurity('ENCRYPTED_MESSAGE_SENT', client.id, { roomId: sanitizedRoomId });
 
-      // Relay encrypted message to all room members (including sender for confirmation)
+      // Relay to all room members INCLUDING sender for confirmation
       this.server.to(sanitizedRoomId).emit('encrypted-message', {
         roomId: sanitizedRoomId,
         username: sanitizedUsername,
@@ -495,23 +481,19 @@ export class GatewayService {
       });
 
     } catch (error) {
-      console.error('Error handling encrypted message:', error);
       this.logSecurity('ENCRYPTED_MESSAGE_ERROR', client.id, { error: error.message });
     }
   }
 
-  // Keep old message handler for backwards compatibility
   @SubscribeMessage('room-message')
   async handleRoomMessage(
     @MessageBody() data: { roomId: string; username: string; text: string; timestamp: string },
     @ConnectedSocket() client: Socket,
   ) {
-    // Warn about using unencrypted messages
     client.emit('room-warning', { 
       message: 'Unencrypted messages are deprecated. Please use encrypted messaging.' 
     });
     
-    // You can either process it or reject it
     client.emit('room-error', { 
       message: 'Please use encrypted messaging for security' 
     });
@@ -543,11 +525,10 @@ export class GatewayService {
         });
       }
     } catch (error) {
-      console.error('Error getting room info:', error);
+      // Handle error silently
     }
   }
 
-  // Security helper methods
   private async hashPassword(password: string): Promise<string> {
     const saltRounds = 12;
     return await bcrypt.hash(password, saltRounds);
@@ -663,26 +644,11 @@ export class GatewayService {
       .substring(0, maxLength);
   }
 
-  private containsSuspiciousContent(text: string): boolean {
-    const suspiciousPatterns = [
-      /<script/i,
-      /javascript:/i,
-      /onload=/i,
-      /onerror=/i,
-      /eval\(/i,
-      /document\.cookie/i,
-      /localStorage/i,
-      /sessionStorage/i,
-    ];
-
-    return suspiciousPatterns.some(pattern => pattern.test(text));
-  }
-
   private leaveRoom(client: Socket, roomId: string) {
     const room = this.rooms.get(roomId);
-    if (room) {
+    if (room && room.members.has(client.id)) {
       room.members.delete(client.id);
-      room.memberPublicKeys.delete(client.id); // Remove public key
+      room.memberPublicKeys.delete(client.id);
       client.leave(roomId);
 
       const user = this.users.get(client.id);
@@ -690,7 +656,6 @@ export class GatewayService {
         user.currentRoom = undefined;
       }
 
-      console.log(`User ${client.id} left room: ${roomId}`);
       this.logSecurity('USER_LEFT_ROOM', client.id, { roomId });
 
       if (room.members.size > 0) {
@@ -706,7 +671,6 @@ export class GatewayService {
           const currentRoom = this.rooms.get(roomId);
           if (currentRoom && currentRoom.members.size === 0) {
             this.rooms.delete(roomId);
-            console.log(`Cleaned up empty room: ${roomId}`);
             this.logSecurity('ROOM_CLEANED_UP', 'system', { roomId });
           }
         }, 300000);
